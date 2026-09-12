@@ -1,0 +1,33 @@
+{
+  "name": "@agentum/x402-spend-guard",
+  "version": "1.0.0",
+  "description": "Trava financeira de saída pra agentes x402: teto por transação, teto diário agregado, allowlist de rede/ativo/destinatário/host e kill switch — o que o SDK oficial não cobre (SpendControls é só por transação).",
+  "type": "commonjs",
+  "main": "index.js",
+  "files": ["index.js", "spend-guard.js", "spend-store.js", "kill-switch-cli.js", "README.md"],
+  "bin": {
+    "x402-kill-switch": "kill-switch-cli.js"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/orionlabsai/x402-spend-guard.git"
+  },
+  "homepage": "https://github.com/orionlabsai/x402-spend-guard",
+  "keywords": [
+    "x402",
+    "spend-control",
+    "budget",
+    "agent-payments",
+    "usdc",
+    "security",
+    "agentic-commerce"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "license": "MIT",
+  "dependencies": {}
+}
