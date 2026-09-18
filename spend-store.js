@@ -17,6 +17,7 @@
 const path = require("path");
 const fs = require("fs");
 const { DatabaseSync } = require("node:sqlite");
+const { HealthStore } = require("./health-store");
 
 const DEFAULT_DB_PATH = path.join(process.cwd(), "data", "x402-spend-guard.sqlite");
 const DEFAULT_KILL_SWITCH_PATH = path.join(process.cwd(), "data", "kill-switch.json");
@@ -54,6 +55,9 @@ class SpendStore {
         resource_url TEXT
       );
     `);
+    // mesma conexão/arquivo -- HealthStore cria sua própria tabela
+    // (endpoint_health), nunca duplica o daily_spend/spend_log.
+    this.health = new HealthStore(this.db);
   }
 
   /**

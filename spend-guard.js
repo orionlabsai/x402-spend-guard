@@ -63,6 +63,27 @@ class SpendGuard {
     // maiúscula por engano nunca bateria com nada (achado de auditoria, L-2).
     this.allowedResourceHosts = new Set(config.allowedResourceHosts.map((h) => String(h).toLowerCase()));
     this.store = config.store || new SpendStore();
+
+    // Circuit breaker é OPT-IN -- ausente por padrão, comportamento
+    // idêntico à v1.0.x pra quem não configurar isso. `health` (saúde
+    // derivada de outcome real, ver health-store.js) ainda é sempre
+    // alimentado quando o store der suporte (best-effort, nunca obrigatório
+    // -- um store customizado antigo sem `.health` continua funcionando
+    // exatamente como antes, só sem essa feature nova).
+    if (config.circuitBreaker !== undefined) {
+      const { failureThreshold = 3, cooldownMs = 60_000 } = config.circuitBreaker || {};
+      if (!Number.isInteger(failureThreshold) || failureThreshold < 1) {
+        throw new Error('SpendGuard: "circuitBreaker.failureThreshold" precisa ser um inteiro >= 1.');
+      }
+      if (!Number.isInteger(cooldownMs) || cooldownMs < 0) {
+        throw new Error('SpendGuard: "circuitBreaker.cooldownMs" precisa ser um inteiro >= 0.');
+      }
+      this.circuitBreaker = { failureThreshold, cooldownMs };
+    }
+  }
+
+  _health() {
+    return this.store.health && typeof this.store.health.recordOutcome === "function" ? this.store.health : null;
   }
 
   /**
@@ -135,6 +156,27 @@ class SpendGuard {
     if (this.store.isKillSwitchActive()) {
       return this._logAndReturn("blocked", "kill_switch_active", {}, resourceUrl);
     }
+    // circuito aberto bloqueia ANTES de qualquer outra checagem -- nunca
+    // vale a pena gastar ciclo de allowlist/teto num host que os últimos N
+    // pagamentos reais confirmaram estar falhando. "half_open" passa (é a
+    // sonda de teste); o resultado real de outcome decide se fecha ou reabre.
+    if (this.circuitBreaker) {
+      const health = this._health();
+      if (health) {
+        let host;
+        try {
+          host = new URL(resourceUrl).hostname;
+        } catch {
+          host = null;
+        }
+        if (host) {
+          const { state } = health.getState(host, { cooldownMs: this.circuitBreaker.cooldownMs });
+          if (state === "open") {
+            return this._logAndReturn("blocked", "circuit_open", {}, resourceUrl);
+          }
+        }
+      }
+    }
     if (!Array.isArray(acceptsArray) || acceptsArray.length === 0) {
       return this._logAndReturn("blocked", "accepts_empty", {}, resourceUrl);
     }
@@ -172,13 +214,68 @@ class SpendGuard {
     return decision === "approved" ? { allowed: true, amountUnits, spentAfter } : { allowed: false, reason };
   }
 
-  /** Registra o resultado real do envio (settled/settle_failed/erro) — separado da decisão do gate, pra auditoria completa. */
+  /**
+   * Registra o resultado real do envio (settled/settle_failed/erro) —
+   * separado da decisão do gate, pra auditoria completa. Também alimenta o
+   * HealthStore (sempre, best-effort) -- é essa alimentação que faz o
+   * circuit breaker funcionar; sem chamar logOutcome depois de cada
+   * pagamento de verdade, o resto desta feature fica sem dado.
+   */
   logOutcome({ outcome, amountUnits, resourceUrl }) {
     try {
       this.store.logDecision({ decision: `outcome_${outcome}`, reason: outcome, amountUnits, resourceUrl });
     } catch {
       // log de melhor esforço — não deve derrubar o script por causa disso
     }
+    const health = this._health();
+    if (health && resourceUrl) {
+      try {
+        const host = new URL(resourceUrl).hostname;
+        health.recordOutcome(host, outcome, this.circuitBreaker || {});
+      } catch {
+        // best-effort -- URL malformada ou erro de store nunca derruba o outcome logging acima
+      }
+    }
+  }
+
+  /**
+   * Consulta a saúde/estado do circuito de um host, sem depender de
+   * `circuitBreaker` estar configurado (usa os defaults do health-store.js
+   * pra leitura só-consulta). Útil pra decidir manualmente antes de tentar
+   * pagar, mesmo sem habilitar o bloqueio automático em evaluateAccepts.
+   */
+  getEndpointHealth(resourceUrl, opts) {
+    const unknown = { state: "unknown", consecutiveFailures: 0, lastOutcome: null, lastOutcomeAt: null };
+    const health = this._health();
+    if (!health) return unknown;
+    let host;
+    try {
+      host = new URL(resourceUrl).hostname;
+    } catch {
+      return unknown; // URL malformada/ausente -- nunca lança (mesma garantia fail-closed do resto da lib)
+    }
+    // `opts` default só cobre `undefined` (parâmetro omitido), não `null`
+    // explícito -- achado real de reauditoria (2026-09-18): passar `null`
+    // de propósito lançava "Cannot read properties of null". `?? {}` cobre
+    // os dois casos.
+    return health.getState(host, { cooldownMs: (opts ?? {}).cooldownMs ?? this.circuitBreaker?.cooldownMs });
+  }
+
+  /**
+   * Failover mínimo e honesto: dado uma lista ORDENADA de URLs candidatas
+   * pro MESMO recurso (ex: espelhos do mesmo serviço em hosts diferentes),
+   * devolve a primeira cujo circuito não está "open". Esta lib nunca
+   * descobre alternativas sozinha -- quem chama já precisa saber quais são
+   * os próprios espelhos/fallbacks. Retorna `null` se todas estiverem
+   * abertas (fail-closed: nenhum candidato confiável agora).
+   */
+  pickHealthyResource(candidateUrls) {
+    if (!Array.isArray(candidateUrls)) return null; // input errado (ex: string) nunca lança, fail-closed
+    for (const url of candidateUrls) {
+      const { state } = this.getEndpointHealth(url); // "unknown"/"closed"/"half_open" passam, só "open" pula
+      if (state !== "open") return url;
+    }
+    return null;
   }
 }
 
