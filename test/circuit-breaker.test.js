@@ -93,11 +93,36 @@ test("sonda de half_open que falha de novo reabre o circuito e reinicia o cooldo
   assert.equal(guard.getEndpointHealth(RESOURCE_URL).state, "open", "reabriu imediatamente após a sonda falhar");
 });
 
-test("circuito é por HOST, não por URL completa nem por instância global -- hosts diferentes não se afetam", () => {
+test("hosts diferentes nunca se afetam (nem por instância global)", () => {
   const { guard } = freshGuard({ circuitBreaker: { failureThreshold: 1, cooldownMs: 60_000 } });
   guard.logOutcome({ outcome: "settle_failed", amountUnits: 10_000, resourceUrl: RESOURCE_URL }); // example.com
   assert.equal(guard.evaluateAccepts([requirement()], RESOURCE_URL).allowed, false);
   assert.equal(guard.evaluateAccepts([requirement()], OTHER_HOST_URL).allowed, true, "mirror.example.com nunca falhou, deve continuar saudável");
+});
+
+test("chave de saúde é HOST+PATH, não só o host (achado real, 18/09/2026)", () => {
+  // motivo real da mudança: um domínio pode hospedar rotas independentes
+  // (ex: uma rota real e seu espelho, mesmo host, path diferente) -- se a
+  // chave fosse só o host, falha numa rota abriria o circuito da OUTRA
+  // também, e pickHealthyResource nunca conseguiria desviar pro "espelho"
+  // porque ele teria a MESMA saúde (mesmo host) o tempo todo.
+  const { guard } = freshGuard({ circuitBreaker: { failureThreshold: 1, cooldownMs: 60_000 } });
+  const rotaA = "https://example.com/rota-a";
+  const rotaB = "https://example.com/rota-b"; // MESMO host, path diferente
+
+  guard.logOutcome({ outcome: "settle_failed", amountUnits: 10_000, resourceUrl: rotaA });
+  assert.equal(guard.getEndpointHealth(rotaA).state, "open");
+  assert.equal(guard.getEndpointHealth(rotaB).state, "closed", "path diferente no MESMO host precisa ter saúde independente");
+  assert.equal(guard.pickHealthyResource([rotaA, rotaB]), rotaB, "failover real: desvia pro path saudável do mesmo domínio");
+});
+
+test("mesmo path com query string diferente continua compartilhando saúde (é o mesmo endpoint, argumento diferente)", () => {
+  const { guard } = freshGuard({ circuitBreaker: { failureThreshold: 1, cooldownMs: 60_000 } });
+  const chamada1 = "https://example.com/verificar-cnpj?cnpj=11111111000191";
+  const chamada2 = "https://example.com/verificar-cnpj?cnpj=22222222000172";
+
+  guard.logOutcome({ outcome: "settle_failed", amountUnits: 10_000, resourceUrl: chamada1 });
+  assert.equal(guard.getEndpointHealth(chamada2).state, "open", "mesmo pathname, query diferente -- ainda é o mesmo endpoint, deve compartilhar saúde");
 });
 
 test("pickHealthyResource devolve o primeiro candidato saudável e null se todos estiverem abertos", () => {

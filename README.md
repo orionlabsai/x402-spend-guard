@@ -21,7 +21,7 @@ Uma camada **fora** do caminho de decisão do código que assina a transação �
 - Kill switch read-only pro código que gasta — só um CLI separado escreve, com `chmod 444` de fricção extra
 - Fail-closed em tudo: erro interno, JSON corrompido, `accepts[]` vazio/malformado — tudo vira bloqueio, nunca exceção não tratada
 - Log de toda decisão (aprovada ou bloqueada) + do resultado real do envio, separados
-- **Circuit breaker opcional por saúde real de outcome** (v1.1.0) — pausa automaticamente pagamentos pra um host que os últimos pagamentos reais confirmaram estar falhando, sem depender de polling de liveness (`GET /health`)
+- **Circuit breaker opcional por saúde real de outcome** (v1.1.0+) — pausa automaticamente pagamentos pra um endpoint (host+path) que os últimos pagamentos reais confirmaram estar falhando, sem depender de polling de liveness (`GET /health`)
 
 Testado em produção real: o teto/allowlist/kill switch é a mesma trava usada pelo [Payment Agent da AGENTUM](https://agentum.lat) desde 2026-09-05, com pagamentos reais em Base mainnet. **O circuit breaker (v1.1.0) é novo e ainda não passou por produção** — testado com concorrência real entre processos (não só chamadas no mesmo processo) antes do release, mas sem histórico de uso real ainda.
 
@@ -87,7 +87,7 @@ const guard = new SpendGuard({
 const decision = guard.evaluateAccepts(paymentRequired.accepts, resourceUrl);
 if (!decision.allowed) {
   // decision.reason pode ser "circuit_open" agora -- 3 outcomes reais
-  // seguidos que não foram "settled" pra esse HOST, e o cooldown ainda não expirou.
+  // seguidos que não foram "settled" pra esse ENDPOINT (host+path), e o cooldown ainda não expirou.
 }
 
 // sempre chamar logOutcome depois do resultado real -- é isso que alimenta o circuit breaker
@@ -95,9 +95,9 @@ guard.logOutcome({ outcome: "settled" /* ou "settle_failed", "network_error", et
 ```
 
 - **Estados**: `closed` (normal) → `open` (depois de N falhas consecutivas, bloqueia) → `half_open` (cooldown expirou, deixa passar 1 sonda de teste) → `closed` de novo se a sonda vier `settled`, ou `open` de novo (reinicia o cooldown) se falhar.
-- **Por host**, não por URL completa nem por instância global — `/rota-a` e `/rota-b` do mesmo domínio compartilham saúde; hosts diferentes nunca se afetam.
+- **Por host + path** (v1.1.1) — `/rota-a` e `/rota-b` do mesmo domínio têm saúde INDEPENDENTE; a mesma rota com query string diferente (`?id=1` vs `?id=2`) continua compartilhando saúde, é o mesmo endpoint. Corrigido depois de tentar usar o failover de verdade entre uma rota real e seu espelho no mesmo domínio (v1.1.0 agrupava por host inteiro, o que fazia o "espelho" nunca poder ser escolhido — tinha sempre a mesma saúde da rota principal).
 - **Sempre opt-in**: sem `circuitBreaker` na config, nada disso roda — só o teto/allowlist de sempre. Consultar saúde manualmente com `guard.getEndpointHealth(url)` funciona mesmo sem habilitar o bloqueio automático.
-- **Failover mínimo**: `guard.pickHealthyResource([urlPrincipal, urlEspelho, ...])` devolve a primeira URL cujo host não está `open`, ou `null` se todas estiverem — a lib nunca descobre espelhos sozinha, só ajuda a escolher entre os que você já conhece.
+- **Failover mínimo**: `guard.pickHealthyResource([urlPrincipal, urlEspelho, ...])` devolve a primeira URL cujo endpoint (host+path) não está `open`, ou `null` se todas estiverem — funciona mesmo que os espelhos estejam no MESMO domínio da rota principal. A lib nunca descobre espelhos sozinha, só ajuda a escolher entre os que você já conhece.
 - **Retrocompatível de propósito**: um `store` customizado escrito antes desta versão (sem `.health`) continua funcionando exatamente como antes — o circuit breaker simplesmente nunca bloqueia nesse caso (best-effort, nunca lança).
 
 ## Store customizado
@@ -113,6 +113,8 @@ Por padrão, `SpendGuard` cria seu próprio `SpendStore` (SQLite em `./data/x402
 - **Se você criar mais de um `SpendGuard` no mesmo processo sem passar `store` explícito pra cada um, os dois vão compartilhar o mesmo arquivo SQLite padrão** (`./data/x402-spend-guard.sqlite`) e portanto o mesmo teto diário acumulado — provavelmente não é o que você quer. Passe um `store` com `dbPath` próprio pra cada guard se precisar de políticas independentes.
 - **Circuit breaker é heurística simples, não um SLA**: threshold fixo de falhas consecutivas (sem backoff exponencial, sem distinguir "servidor fora do ar" de "seu próprio saldo/config está errado" — qualquer outcome diferente de `settled` conta igual). Um provedor genuinamente saudável pode ficar bloqueado por alguns minutos por uma sequência de erro transitório do SEU lado (rede, nonce, etc), não necessariamente do lado dele.
 - **Estado de saúde é local ao `SpendStore`** (mesmo SQLite do teto diário) — múltiplos processos no mesmo host compartilham (se apontarem pro mesmo `dbPath`), múltiplos hosts, não.
+- **Chave de saúde é host+pathname, não um "endpoint canônico"**: uma rota parametrizada no path (ex: `/users/123` vs `/users/456`, se você usar esse estilo de URL) vira uma chave DIFERENTE por valor, e as falhas nunca se acumulam o suficiente pra abrir o circuito dessa rota. Funciona bem pra rotas com parâmetros só em query string (`/users?id=123` — ignorado na chave) ou pra espelhos com paths fixos (`/rota` vs `/rota-mirror`), que foi o caso real que motivou a feature.
+- **Upgrade de v1.1.0 pra v1.1.1**: a chave mudou de host para host+pathname — um circuito que já estivesse `open` sob a chave antiga (só host) não é migrado, reabre como `closed` até a próxima falha real. Sem risco de gasto indevido (é só a trava de saúde relaxando, o teto/allowlist continuam intactos), mas vale saber se você rodou a v1.1.0 por mais que algumas horas antes de atualizar.
 - **Não avalia destinatários secundários de split-payment** (ex: `PaymentRequirements.extra.splits`, proposto na [PR #3221](https://github.com/x402-foundation/x402/pull/3221) do x402 core — ainda não é spec oficial hoje). `checkOption()` só confere o `payTo`/`amount` do nível principal de cada opção em `accepts[]`; se um esquema de pagamento dividido virar padrão, uma perna secundária (taxa de plataforma, referral) poderia sair da allowlist de destinatário ou empurrar o gasto agregado além do teto sem a guard perceber. Achado real, levantado por [@whawk46](https://github.com/x402-foundation/x402/issues/3170#issuecomment-5646093920) — rastreado aqui, não implementado ainda porque o campo não existe em nenhuma resposta real de servidor x402 hoje.
 
 ## Licença

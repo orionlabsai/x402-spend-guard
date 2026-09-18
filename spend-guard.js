@@ -14,6 +14,22 @@
  */
 const { SpendStore } = require("./spend-store");
 
+// Chave de saúde do circuit breaker: host + pathname, NUNCA só o host.
+// Achado real (18/09/2026, tentando usar isso de verdade num caso real):
+// um domínio pode hospedar várias rotas independentes (ex: agentum.lat/foo
+// e agentum.lat/foo-mirror, pensado como espelho um do outro) -- agrupar
+// por host inteiro faz falhas numa rota abrirem o circuito de TODAS as
+// outras do mesmo domínio, inclusive do "espelho" que devia servir de
+// fallback (mesmo host = mesma chave = mesmo estado, o failover nunca
+// funcionaria). Pathname é normalizado (sem query string), então
+// `/verificar-cnpj?cnpj=A` e `/verificar-cnpj?cnpj=B` continuam
+// compartilhando saúde (é o mesmo endpoint, argumentos diferentes) --
+// só rotas com PATH diferente é que agora têm saúde independente.
+function resourceKeyFor(resourceUrl) {
+  const u = new URL(resourceUrl);
+  return u.hostname + u.pathname;
+}
+
 class SpendGuard {
   /**
    * @param {object} config
@@ -163,14 +179,14 @@ class SpendGuard {
     if (this.circuitBreaker) {
       const health = this._health();
       if (health) {
-        let host;
+        let key;
         try {
-          host = new URL(resourceUrl).hostname;
+          key = resourceKeyFor(resourceUrl);
         } catch {
-          host = null;
+          key = null;
         }
-        if (host) {
-          const { state } = health.getState(host, { cooldownMs: this.circuitBreaker.cooldownMs });
+        if (key) {
+          const { state } = health.getState(key, { cooldownMs: this.circuitBreaker.cooldownMs });
           if (state === "open") {
             return this._logAndReturn("blocked", "circuit_open", {}, resourceUrl);
           }
@@ -230,8 +246,7 @@ class SpendGuard {
     const health = this._health();
     if (health && resourceUrl) {
       try {
-        const host = new URL(resourceUrl).hostname;
-        health.recordOutcome(host, outcome, this.circuitBreaker || {});
+        health.recordOutcome(resourceKeyFor(resourceUrl), outcome, this.circuitBreaker || {});
       } catch {
         // best-effort -- URL malformada ou erro de store nunca derruba o outcome logging acima
       }
@@ -248,9 +263,9 @@ class SpendGuard {
     const unknown = { state: "unknown", consecutiveFailures: 0, lastOutcome: null, lastOutcomeAt: null };
     const health = this._health();
     if (!health) return unknown;
-    let host;
+    let key;
     try {
-      host = new URL(resourceUrl).hostname;
+      key = resourceKeyFor(resourceUrl);
     } catch {
       return unknown; // URL malformada/ausente -- nunca lança (mesma garantia fail-closed do resto da lib)
     }
@@ -258,7 +273,7 @@ class SpendGuard {
     // explícito -- achado real de reauditoria (2026-09-18): passar `null`
     // de propósito lançava "Cannot read properties of null". `?? {}` cobre
     // os dois casos.
-    return health.getState(host, { cooldownMs: (opts ?? {}).cooldownMs ?? this.circuitBreaker?.cooldownMs });
+    return health.getState(key, { cooldownMs: (opts ?? {}).cooldownMs ?? this.circuitBreaker?.cooldownMs });
   }
 
   /**

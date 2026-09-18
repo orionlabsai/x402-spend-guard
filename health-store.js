@@ -11,6 +11,12 @@
  * derivado na leitura (half_open, calculado a partir do cooldown — nunca
  * persistido, pra evitar duas leituras concorrentes decidirem estados
  * diferentes por conta própria).
+ *
+ * Esta classe é agnóstica sobre o que é a "chave" (parâmetro `resourceHost`
+ * nos métodos abaixo, nome histórico) -- quem decide o que vira chave é
+ * `spend-guard.js` (`resourceKeyFor()`, host+pathname desde v1.1.1, corrigido
+ * depois de um host+path virar host inteiro agrupar rotas independentes sob
+ * o mesmo circuito). Esta classe só agrega o que recebe.
  */
 const DEFAULT_FAILURE_THRESHOLD = 3;
 const DEFAULT_COOLDOWN_MS = 60_000;

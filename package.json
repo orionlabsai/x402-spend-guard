@@ -1,6 +1,6 @@
 {
   "name": "@agentum/x402-spend-guard",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Trava financeira de saída pra agentes x402: teto por transação, teto diário agregado, allowlist de rede/ativo/destinatário/host, kill switch e circuit breaker por saúde real de outcome — o que o SDK oficial não cobre (SpendControls é só por transação).",
   "type": "commonjs",
   "main": "index.js",
